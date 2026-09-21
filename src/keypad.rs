@@ -20,4 +20,11 @@ impl Keypad {
     pub fn is_pressed(&self, key: usize) -> bool {
         self.keys[key]
     }
+
+    pub fn first_pressed(&self) -> Option<u8> {
+        self.keys
+            .iter()
+            .position(|&pressed| pressed)
+            .map(|i| i as u8)
+    }
 }

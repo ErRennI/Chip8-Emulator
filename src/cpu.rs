@@ -1,4 +1,4 @@
-use crate::display::Display;
+use crate::display::{Display, HEIGHT, WIDTH};
 use crate::font::FONT;
 use crate::keypad::Keypad;
 
@@ -129,9 +129,50 @@ impl Chip8 {
                 0x2 => self.v[x] &= self.v[y],
                 0x4 => self.op_8xy4(x, y),
                 0x5 => self.op_8xy5(x, y),
+                0x6 => self.op_8xy6(x),
+                0x7 => self.op_8xy7(x, y),
+                0xE => self.op_8xye(x),
                 _ => return Err(Chip8Error::InvalidOpcode(opcode)),
             },
-
+            0x9 => {
+                if self.v[x] != self.v[y] {
+                    self.pc += 2;
+                }
+            }
+            0xA => self.i = nnn,
+            0xB => self.pc = (self.v[0] as u16) + nnn,
+            0xC => self.v[x] = rand::random_range(0..=255) & kk,
+            0xD => self.op_dxyn(x, y, n),
+            0xE => match kk {
+                0x9E => {
+                    if self.keypad.is_pressed((self.v[x] & 0xF) as usize) {
+                        self.pc += 2;
+                    }
+                }
+                0xA1 => {
+                    if !self.keypad.is_pressed((self.v[x] & 0xF) as usize) {
+                        self.pc += 2;
+                    }
+                }
+                _ => return Err(Chip8Error::InvalidOpcode(opcode)),
+            },
+            0xF => match kk {
+                0x07 => self.v[x] = self.delay_timer,
+                0x0A => {
+                    if let Some(key) = self.keypad.first_pressed() {
+                        self.v[x] = key;
+                    } else {
+                        self.pc -= 2;
+                    }
+                }
+                0x15 => self.delay_timer = self.v[x],
+                0x18 => self.sound_timer = self.v[x],
+                0x1E => self.i += self.v[x] as u16,
+                0x29 => self.i = (FONT_START + (self.v[x] & 0xF) as usize * 5) as u16,
+                0x33 => self.op_fx33(x),
+                //0x55 =>
+                _ => return Err(Chip8Error::InvalidOpcode(opcode)),
+            },
             _ => return Err(Chip8Error::InvalidOpcode(opcode)),
         }
         Ok(())
@@ -149,8 +190,65 @@ impl Chip8 {
     // If Vx > Vy, then VF is set to 1, otherwise 0.
     // Then Vy is subtracted from Vx, and the results stored in Vx.
     fn op_8xy5(&mut self, x: usize, y: usize) {
-        let (result, borrow) = self.v[x].overflowing_sub(self.v[x]);
+        let (result, borrow) = self.v[x].overflowing_sub(self.v[y]);
         self.v[x] = result;
-        self.v[VF] = borrow as u8;
+        self.v[VF] = if borrow { 0 } else { 1 };
+    }
+
+    fn op_8xy6(&mut self, x: usize) {
+        self.v[VF] = self.v[x] & 0x01;
+        self.v[x] >>= 1;
+    }
+
+    fn op_8xy7(&mut self, x: usize, y: usize) {
+        let (result, borrow) = self.v[y].overflowing_sub(self.v[x]);
+        self.v[x] = result;
+        self.v[VF] = if borrow { 0 } else { 1 };
+    }
+
+    fn op_8xye(&mut self, x: usize) {
+        self.v[VF] = self.v[x] >> 7;
+        self.v[x] <<= 1;
+    }
+
+    // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
+    // The interpreter reads n bytes from memory, starting at the address stored in I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
+    // Sprites are XORed onto the existing screen.
+    // If this causes any pixels to be erased, VF is set to 1, otherwise it is set to 0.
+    fn op_dxyn(&mut self, x: usize, y: usize, n: u8) {
+        let vx: usize = self.v[x] as usize % WIDTH;
+        let vy: usize = self.v[y] as usize % HEIGHT;
+        self.v[VF] = 0;
+
+        for row in 0..n as usize {
+            let byte: u8 = self.memory[self.i as usize + row];
+            if vy + row >= HEIGHT {
+                break;
+            }
+
+            for col in 0..8 {
+                if vx + col >= WIDTH {
+                    break;
+                }
+
+                let bit: bool = (byte >> (7 - col)) & 1 == 1;
+
+                if bit {
+                    let index: usize = (vy + row) * WIDTH + (vx + col);
+
+                    if self.display.pixels[index] {
+                        self.v[VF] = 1;
+                    }
+
+                    self.display.pixels[index] ^= true;
+                }
+            }
+        }
+    }
+
+    fn op_fx33(&mut self, x: usize) {
+        self.memory[self.i as usize] = (self.v[x] / 100) % 10;
+        self.memory[(self.i + 1) as usize] = (self.v[x] / 10) % 10;
+        self.memory[(self.i + 2) as usize] = self.v[x] % 10;
     }
 }
