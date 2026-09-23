@@ -12,6 +12,7 @@ pub enum Chip8Error {
     StackOverflow,
     StackUnderflow,
     InvalidOpcode(u16),
+    OutOfBounds { addr: usize },
 }
 
 pub struct Chip8 {
@@ -34,6 +35,9 @@ pub struct Chip8 {
 
     pub display: Display,
     pub keypad: Keypad,
+
+    pub waiting_for_vblank: bool,
+    pub waiting_key: Option<u8>,
 }
 
 impl Default for Chip8 {
@@ -55,6 +59,8 @@ impl Chip8 {
             sound_timer: 0,
             display: Display::new(),
             keypad: Keypad::new(),
+            waiting_for_vblank: false,
+            waiting_key: None,
         };
 
         chip8.memory[FONT_START..FONT_START + FONT.len()].copy_from_slice(&FONT);
@@ -70,7 +76,7 @@ impl Chip8 {
         Ok(())
     }
 
-    pub fn fetch(&mut self) -> u16 {
+    fn fetch(&mut self) -> u16 {
         let opcode: u16 = u16::from_be_bytes([
             self.memory[self.pc as usize],
             self.memory[(self.pc + 1) as usize],
@@ -80,7 +86,7 @@ impl Chip8 {
         opcode
     }
 
-    pub fn execute(&mut self, opcode: u16) -> Result<(), Chip8Error> {
+    fn execute(&mut self, opcode: u16) -> Result<(), Chip8Error> {
         let op: u16 = (opcode & 0xF000) >> 12;
         let x: usize = ((opcode & 0x0F00) >> 8) as usize;
         let y: usize = ((opcode & 0x00F0) >> 4) as usize;
@@ -92,8 +98,11 @@ impl Chip8 {
             0x0 => match kk {
                 0xE0 => self.display.clear(),
                 0xEE => {
-                    self.pc = self.stack[self.sp];
+                    if self.sp == 0 {
+                        return Err(Chip8Error::StackUnderflow);
+                    }
                     self.sp -= 1;
+                    self.pc = self.stack[self.sp];
                 }
                 _ => return Err(Chip8Error::InvalidOpcode(opcode)),
             },
@@ -122,16 +131,26 @@ impl Chip8 {
                 }
             }
             0x6 => self.v[x] = kk,
-            0x7 => self.v[x] += kk,
+            0x7 => self.v[x] = self.v[x].wrapping_add(kk),
             0x8 => match n {
                 0x0 => self.v[x] = self.v[y],
-                0x1 => self.v[x] |= self.v[y],
-                0x2 => self.v[x] &= self.v[y],
+                0x1 => {
+                    self.v[x] |= self.v[y];
+                    self.v[VF] = 0;
+                }
+                0x2 => {
+                    self.v[x] &= self.v[y];
+                    self.v[VF] = 0;
+                }
+                0x3 => {
+                    self.v[x] ^= self.v[y];
+                    self.v[VF] = 0;
+                }
                 0x4 => self.op_8xy4(x, y),
                 0x5 => self.op_8xy5(x, y),
-                0x6 => self.op_8xy6(x),
+                0x6 => self.op_8xy6(x, y),
                 0x7 => self.op_8xy7(x, y),
-                0xE => self.op_8xye(x),
+                0xE => self.op_8xye(x, y),
                 _ => return Err(Chip8Error::InvalidOpcode(opcode)),
             },
             0x9 => {
@@ -140,7 +159,7 @@ impl Chip8 {
                 }
             }
             0xA => self.i = nnn,
-            0xB => self.pc = (self.v[0] as u16) + nnn,
+            0xB => self.pc = (self.v[0] as u16).wrapping_add(nnn),
             0xC => self.v[x] = rand::random_range(0..=255) & kk,
             0xD => self.op_dxyn(x, y, n),
             0xE => match kk {
@@ -159,23 +178,49 @@ impl Chip8 {
             0xF => match kk {
                 0x07 => self.v[x] = self.delay_timer,
                 0x0A => {
-                    if let Some(key) = self.keypad.first_pressed() {
-                        self.v[x] = key;
+                    if let Some(key) = self.waiting_key {
+                        if !self.keypad.is_pressed(key as usize) {
+                            self.v[x] = key;
+                            self.waiting_key = None;
+                        } else {
+                            self.pc -= 2;
+                        }
+                    } else if let Some(key) = self.keypad.first_pressed() {
+                        self.waiting_key = Some(key);
+                        self.pc -= 2;
                     } else {
                         self.pc -= 2;
                     }
                 }
                 0x15 => self.delay_timer = self.v[x],
                 0x18 => self.sound_timer = self.v[x],
-                0x1E => self.i += self.v[x] as u16,
+                0x1E => self.i = self.i.wrapping_add(self.v[x] as u16),
                 0x29 => self.i = (FONT_START + (self.v[x] & 0xF) as usize * 5) as u16,
-                0x33 => self.op_fx33(x),
-                //0x55 =>
+                0x33 => self.op_fx33(x)?,
+                0x55 => self.op_fx55(x)?,
+                0x65 => self.op_fx65(x)?,
                 _ => return Err(Chip8Error::InvalidOpcode(opcode)),
             },
             _ => return Err(Chip8Error::InvalidOpcode(opcode)),
         }
         Ok(())
+    }
+
+    pub fn step(&mut self) -> Result<(), Chip8Error> {
+        if self.waiting_for_vblank {
+            return Ok(());
+        }
+        let opcode = self.fetch();
+        self.execute(opcode)
+    }
+
+    pub fn tick_timers(&mut self) {
+        if self.delay_timer > 0 {
+            self.delay_timer -= 1;
+        }
+        if self.sound_timer > 0 {
+            self.sound_timer -= 1;
+        }
     }
 
     // The values of Vx and Vy are added together.
@@ -195,9 +240,10 @@ impl Chip8 {
         self.v[VF] = if borrow { 0 } else { 1 };
     }
 
-    fn op_8xy6(&mut self, x: usize) {
-        self.v[VF] = self.v[x] & 0x01;
-        self.v[x] >>= 1;
+    fn op_8xy6(&mut self, x: usize, y: usize) {
+        let flag: u8 = self.v[y] & 0x01;
+        self.v[x] = self.v[y] >> 1;
+        self.v[VF] = flag;
     }
 
     fn op_8xy7(&mut self, x: usize, y: usize) {
@@ -206,9 +252,10 @@ impl Chip8 {
         self.v[VF] = if borrow { 0 } else { 1 };
     }
 
-    fn op_8xye(&mut self, x: usize) {
-        self.v[VF] = self.v[x] >> 7;
-        self.v[x] <<= 1;
+    fn op_8xye(&mut self, x: usize, y: usize) {
+        let flag: u8 = self.v[y] >> 7;
+        self.v[x] = self.v[y] << 1;
+        self.v[VF] = flag;
     }
 
     // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
@@ -244,11 +291,46 @@ impl Chip8 {
                 }
             }
         }
+        self.waiting_for_vblank = true;
     }
 
-    fn op_fx33(&mut self, x: usize) {
-        self.memory[self.i as usize] = (self.v[x] / 100) % 10;
-        self.memory[(self.i + 1) as usize] = (self.v[x] / 10) % 10;
-        self.memory[(self.i + 2) as usize] = self.v[x] % 10;
+    //Store BCD representation of Vx in memory locations I, I+1, and I+2
+    fn op_fx33(&mut self, x: usize) -> Result<(), Chip8Error> {
+        let i = self.i as usize;
+        if i + 2 >= 4096 {
+            return Err(Chip8Error::OutOfBounds { addr: i + 2 });
+        }
+        self.memory[i] = (self.v[x] / 100) % 10;
+        self.memory[i + 1] = (self.v[x] / 10) % 10;
+        self.memory[i + 2] = self.v[x] % 10;
+        Ok(())
+    }
+
+    //Store registers V0 through Vx in memory starting at location I.
+    fn op_fx55(&mut self, x: usize) -> Result<(), Chip8Error> {
+        let start: usize = self.i as usize;
+
+        let dest = self
+            .memory
+            .get_mut(start..=start + x)
+            .ok_or(Chip8Error::OutOfBounds { addr: (start + x) })?;
+
+        dest.copy_from_slice(&self.v[..=x]);
+        self.i = self.i.wrapping_add(x as u16 + 1);
+        Ok(())
+    }
+
+    //Read registers V0 through Vx from memory starting at location I.
+    fn op_fx65(&mut self, x: usize) -> Result<(), Chip8Error> {
+        let i: usize = self.i as usize;
+
+        let values = &self
+            .memory
+            .get(i..=i + x)
+            .ok_or(Chip8Error::OutOfBounds { addr: (i + x) })?;
+        self.v[..=x].copy_from_slice(values);
+
+        self.i = self.i.wrapping_add(x as u16 + 1);
+        Ok(())
     }
 }
