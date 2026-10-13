@@ -2,6 +2,7 @@ use crate::display::{Display, HEIGHT, WIDTH};
 use crate::font::FONT;
 use crate::keypad::Keypad;
 
+const MEMORY_SIZE: usize = 4096;
 const FONT_START: usize = 0x050;
 const ROM_START: usize = 0x200;
 const STACK_SIZE: usize = 16;
@@ -15,9 +16,22 @@ pub enum Chip8Error {
     OutOfBounds { addr: usize },
 }
 
+impl std::fmt::Display for Chip8Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StackOverflow => write!(f, "stack overflow"),
+            Self::StackUnderflow => write!(f, "stack underflow"),
+            Self::InvalidOpcode(op) => write!(f, "invalid opcode {op:#06X}"),
+            Self::OutOfBounds { addr } => write!(f, "out-of-bounds memory access at {addr:#05X}"),
+        }
+    }
+}
+
+impl std::error::Error for Chip8Error {}
+
 pub struct Chip8 {
     //Memory
-    pub memory: [u8; 4096],
+    pub memory: [u8; MEMORY_SIZE],
 
     //Registers
     pub v: [u8; 16],

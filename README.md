@@ -12,7 +12,7 @@ A CHIP-8 interpreter/emulator written in Rust, built from scratch as a learning 
   - Display wait (vblank) quirk for `DXYN`
   - `8xy6`/`8xyE` (shift) operate on `VY`, storing the result in `VX`
 - Proper `FX0A` behavior: waits for a key to be pressed **and released**
-- 64x32 display rendered with [`minifb`](https://crates.io/crates/minifb), scaled up for visibility
+- 64x32 display rendered with [`sdl2`](https://crates.io/crates/sdl2), scaled up for visibility
 - Keyboard input mapped to the classic CHIP-8 layout
 - Command-line ROM loading via [`clap`](https://crates.io/crates/clap)
 - Descriptive runtime errors (invalid opcodes, stack overflow/underflow, out-of-bounds memory access) instead of silent panics
@@ -66,14 +66,6 @@ cargo run -- rom/pong.ch8 --speed 15
 ```
 
 Lower values make games feel slower/sluggish; higher values make them feel faster and more responsive, but pushing it too high can make some games unplayable (e.g. overly twitchy controls).
-
-### Known display issue on GNOME/Wayland
-
-On GNOME running under Wayland, the emulator window may appear without a title bar or border, and you may see a `Failed to create server-side surface decoration: Missing` warning in the terminal. This is **not a bug in the emulator** — GNOME's Wayland compositor (Mutter) doesn't support server-side window decorations, which `minifb` relies on. The window still works correctly (input, rendering, and closing via **Esc** are unaffected).
-
-Workarounds:
-- Force X11/XWayland: `WAYLAND_DISPLAY= cargo run -- rom/.ch8`
-- Or simply ignore it — it's cosmetic only.
 
 ## Keyboard Layout
 
